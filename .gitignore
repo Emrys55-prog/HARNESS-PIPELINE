@@ -1,0 +1,8 @@
+credentials.json
+.env
+.venv/
+__pycache__/
+*.pyc
+.wq_session_cookies.pkl
+logs/
+data/
