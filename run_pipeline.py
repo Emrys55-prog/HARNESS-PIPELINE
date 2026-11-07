@@ -102,12 +102,23 @@ def _submit_selected_alphas() -> int:
 
     ids_path = DATA / "top25_alpha_ids.json"
     print(f"Starting submission queue from {ids_path.relative_to(ROOT)}.")
-    result = subprocess.run(
+    queue_result = subprocess.run(
         [sys.executable, str(ROOT / "submit_queue.py"), "--file", str(ids_path)],
         cwd=ROOT,
         check=False,
     )
-    return result.returncode
+
+    processors = (
+        "create_submission_output.py",
+        "filter_alphas.py",
+        "get_failed_submissions_ids.py",
+    )
+    for script in processors:
+        result = subprocess.run([sys.executable, str(ROOT / script)], cwd=ROOT, check=False)
+        if result.returncode != 0:
+            print(f"Submission output processing failed in {script}.", file=sys.stderr)
+            return result.returncode
+    return queue_result.returncode
 
 
 def main() -> int:

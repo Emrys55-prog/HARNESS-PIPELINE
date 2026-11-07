@@ -245,9 +245,15 @@ After candidate selection, `run_pipeline.py` automatically runs
 
 The queue uses `submit.py` to retrieve and display each alpha. Type `yes` to
 submit the displayed alpha, `skip` to continue without submitting it, or
-`stop` to end the queue. There is no startup Yes/No prompt, but each alpha
-still requires its own confirmation. The queue reports submitted, skipped,
-and failed IDs; it does not maintain a persistent submission history.
+`stop` to end the queue. Each accepted submission is checked up to three
+times, 15 seconds apart. An alpha still marked `UNSUBMITTED` after those
+checks is recorded as failed. Each alpha still requires its own confirmation.
+
+The queue writes structured results to `data/submit_queue_output.json`.
+The pipeline then runs `create_submission_output.py`, `filter_alphas.py`, and
+`get_failed_submissions_ids.py` to create `data/submission_output.json`,
+`data/active_alphas.json`, `data/failed_submissions.json`, and
+`data/failed_id_submissions.json`.
 
 ## Project Structure
 
@@ -263,6 +269,9 @@ HARNESS-PIPELINE/
 ├── top25_id_retriever.py
 ├── submit_queue.py
 ├── submit.py
+├── create_submission_output.py
+├── filter_alphas.py
+├── get_failed_submissions_ids.py
 ├── data/
 │   ├── alpha_ids.txt
 │   ├── top25_alphas.json
@@ -275,9 +284,11 @@ HARNESS-PIPELINE/
     └── test_state.py
 ```
 
-The pipeline uses `top25_id_retriever.py` to extract selected IDs and then
-starts `submit_queue.py` with the generated JSON file. The queue calls
-functions from `submit.py` and asks for confirmation before each submission.
+The pipeline extracts selected IDs, starts the confirmed submission queue,
+and then processes the queue's structured results into active and failed
+reports. `submit.py` checks each accepted request up to three times for
+`ACTIVE`; it records the final outcome instead of directing users to a separate
+status-check script.
 
 ## Technology Stack
 
@@ -432,12 +443,17 @@ A private repository is not a substitute for proper secret management.
 | Field catalog | `src/harness_pipeline/fields/catalog.py`; reusable field lookup and validation |
 | Run manager | `src/harness_pipeline/state/manager.py`; reusable run tracking |
 | Alpha ID retriever | `top25_id_retriever.py`; extracts selected IDs to `data/top25_alpha_ids.json` |
-| Submission queue | `submit_queue.py`; started by the pipeline and asks before each alpha submission |
+| Submission queue | `submit_queue.py`; asks before each submission and writes structured outcomes |
+| Submission output | `create_submission_output.py`; creates `data/submission_output.json` |
+| Outcome filter | `filter_alphas.py`; writes active and failed submission records |
+| Failed ID extractor | `get_failed_submissions_ids.py`; writes `data/failed_id_submissions.json` |
 
 `run_pipeline.py` uses the field fetcher and `FieldCatalog`, then records
 stage checkpoints, fetch failures, and selected candidates with `StateManager`.
 After selection, it extracts the Alpha IDs and starts the queue automatically;
-the queue still requires confirmation for each alpha.
+the queue still requires confirmation for each alpha. After the queue ends, the
+runner creates the normalized submission report, splits active and failed
+records, and saves failed IDs for review or future retry.
 
 ### Manual Alpha ID input
 
@@ -484,7 +500,20 @@ python submit_queue.py --file data/top25_alpha_ids.json
 The queue imports `get_alpha`, `show_summary`, and `submit_alpha` from
 `submit.py`. It displays each alpha and requires a separate `yes`
 confirmation before submitting it; `skip` moves to the next alpha and `stop`
-ends the queue.
+ends the queue. The one submission request is followed by up to three status
+checks; these checks do not repeat the submission request.
+
+To process results from a queue run manually, run:
+
+```bash
+python create_submission_output.py
+python filter_alphas.py
+python get_failed_submissions_ids.py
+```
+
+`active_alphas.json` contains records confirmed `ACTIVE`; `failed_submissions.json`
+contains failed records; skipped records remain in `submission_output.json`.
+`failed_id_submissions.json` is a JSON array of the failed Alpha IDs.
 
 ## Research Data Management
 
@@ -502,7 +531,11 @@ data/
 ├── top25_alphas.json
 ├── top25_alphas.csv
 ├── top25_alpha_ids.json
-└── run_history.json
+├── submit_queue_output.json
+├── submission_output.json
+├── active_alphas.json
+├── failed_submissions.json
+└── failed_id_submissions.json
 ```
 
 These files represent the intended data layout and may not all exist yet.
@@ -705,6 +738,7 @@ Do not commit until the credential file is correctly excluded.
 - [x] Add field-based organization.
 - [x] Add diversified top-25 selection.
 - [x] Add the sequential submission queue and its `submit.py` helper.
+- [x] Add three-check submission verification and JSON active/failed result processing.
 - [x] Extract selected top-25 IDs and start the confirmed queue from `run_pipeline.py`.
 - [x] Add the field metadata fetcher, local cache, field catalog, and persistent run state manager.
 - [x] Add tests for the state manager.
