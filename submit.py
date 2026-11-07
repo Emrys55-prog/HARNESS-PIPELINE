@@ -26,7 +26,10 @@ def _request_with_retry(session, method, url, max_retries=6, **kwargs):
             continue
         if resp.status_code == 429:
             retry_after = resp.headers.get("Retry-After")
-            wait = int(retry_after) if retry_after else (2 ** (attempt + 1))
+            try:
+                wait = float(retry_after) if retry_after else float(2 ** (attempt + 1))
+            except (TypeError, ValueError):
+                wait = float(2 ** (attempt + 1))
             print(f"  Rate limited — waiting {wait}s...")
             time.sleep(wait)
             continue
@@ -42,9 +45,15 @@ def get_alpha(session: requests.Session, alpha_id: str) -> dict:
 
 
 def self_correlation_check(alpha: dict) -> dict[str, Any] | None:
-    checks = alpha.get("is", {}).get("checks", []) or []
+    if not isinstance(alpha, dict):
+        return None
+    is_payload = alpha.get("is") or {}
+    checks = is_payload.get("checks", []) if isinstance(is_payload, dict) else []
+    if not checks:
+        checks = alpha.get("checks", []) or []
     return next(
-        (check for check in checks if check.get("name") == "SELF_CORRELATION"),
+        (check for check in checks if isinstance(check, dict)
+         and check.get("name") == "SELF_CORRELATION"),
         None,
     )
 
@@ -59,59 +68,104 @@ def numeric_check_value(check: dict[str, Any] | None) -> float | None:
     return value if math.isfinite(value) else None
 
 
+def _merge_self_correlation(alpha: dict[str, Any], check: dict[str, Any] | None) -> None:
+    if check is None:
+        return
+    is_payload = alpha.setdefault("is", {})
+    if not isinstance(is_payload, dict):
+        is_payload = {}
+        alpha["is"] = is_payload
+    checks = is_payload.setdefault("checks", [])
+    if not isinstance(checks, list):
+        checks = []
+        is_payload["checks"] = checks
+    for index, existing in enumerate(checks):
+        if isinstance(existing, dict) and existing.get("name") == "SELF_CORRELATION":
+            checks[index] = check
+            break
+    else:
+        checks.append(check)
+
+
+def _response_json(response) -> dict[str, Any] | None:
+    try:
+        payload = response.json()
+    except (ValueError, TypeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _retry_after_seconds(response, default: float = 10.0) -> float:
+    value = response.headers.get("Retry-After")
+    if value is None:
+        return default
+    try:
+        return max(0.5, float(value))
+    except (TypeError, ValueError):
+        return default
+
+
 def trigger_and_wait_for_self_correlation(
     session: requests.Session,
     alpha_id: str,
     initial_alpha: dict[str, Any],
     timeout_seconds: float = 900,
-    poll_interval_seconds: float = 15,
+    poll_interval_seconds: float = 10,
     send_trigger: bool = True,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """Trigger a BRAIN check, then wait for its numeric SELF_CORRELATION value."""
+    """Trigger submission checks, then poll BRAIN's submit endpoint for SELF_CORRELATION."""
     current_alpha = initial_alpha
-    existing_check = self_correlation_check(current_alpha)
-    if numeric_check_value(existing_check) is not None:
-        return current_alpha, existing_check
+    check = self_correlation_check(current_alpha)
+    if numeric_check_value(check) is not None:
+        return current_alpha, check
 
+    submit_url = f"{BRAIN_API_BASE}/alphas/{alpha_id}/submit"
     if send_trigger:
         response = _request_with_retry(
-            session, "POST", f"{BRAIN_API_BASE}/alphas/{alpha_id}/submit"
+            session, "POST", submit_url, allow_redirects=False
         )
+        response_payload = _response_json(response)
+        response_check = self_correlation_check(response_payload or {})
+        _merge_self_correlation(current_alpha, response_check)
+        check = self_correlation_check(current_alpha)
+        if numeric_check_value(check) is not None:
+            return current_alpha, check
+        if response.status_code == 403:
+            raise RuntimeError(
+                f"BRAIN rejected the trigger without a numeric SELF_CORRELATION value: {response.text}"
+            )
+        if response.status_code not in (200, 201, 202, 303, 503):
+            raise RuntimeError(f"Correlation trigger failed: {response.status_code} {response.text}")
+        print(f"  Trigger accepted for {alpha_id} (HTTP {response.status_code}); polling {submit_url}.")
     else:
-        response = None
-
-    if response is not None and response.status_code == 403:
-        try:
-            rejected_alpha = response.json()
-            if isinstance(rejected_alpha, dict) and rejected_alpha.get("is"):
-                current_alpha = rejected_alpha
-                existing_check = self_correlation_check(current_alpha)
-                if numeric_check_value(existing_check) is not None:
-                    return current_alpha, existing_check
-        except (ValueError, TypeError):
-            pass
-        print(f"  BRAIN rejected {alpha_id}; waiting for the check value to appear.")
-    elif response is not None and response.status_code not in (200, 201):
-        raise RuntimeError(f"Correlation trigger failed: {response.status_code} {response.text}")
-    elif response is not None:
-        print(f"  Correlation check triggered for {alpha_id} (HTTP {response.status_code}).")
-    else:
-        print(f"  Continuing to wait for the existing check on {alpha_id}.")
+        print(f"  Resuming the in-flight check for {alpha_id} by polling {submit_url}.")
 
     deadline = time.monotonic() + timeout_seconds
     while True:
+        response = _request_with_retry(
+            session, "GET", submit_url, allow_redirects=False
+        )
+        response_payload = _response_json(response)
+        response_check = self_correlation_check(response_payload or {})
+        _merge_self_correlation(current_alpha, response_check)
         check = self_correlation_check(current_alpha)
         value = numeric_check_value(check)
         if value is not None:
             return current_alpha, check
 
+        if response.status_code == 403:
+            raise RuntimeError(
+                f"BRAIN returned HTTP 403 without a numeric SELF_CORRELATION value: {response.text}"
+            )
+        if response.status_code not in (200, 201, 202, 303, 503):
+            raise RuntimeError(f"Could not poll correlation result: {response.status_code} {response.text}")
+
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return current_alpha, None
-
-        time.sleep(min(poll_interval_seconds, remaining))
-        current_alpha = get_alpha(session, alpha_id)
-
+        wait_seconds = min(_retry_after_seconds(response, poll_interval_seconds), remaining)
+        print(f"  {alpha_id}: SELF_CORRELATION still pending; checking again in {wait_seconds:g}s.")
+        time.sleep(wait_seconds)
 
 def show_summary(alpha: dict) -> None:
     is_stats = alpha.get("is", {})

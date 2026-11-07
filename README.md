@@ -581,10 +581,10 @@ pipeline's output files:
   `SELF_CORRELATION` value is strictly below 0.8.
 
 When a failed alpha has no numeric self-correlation value yet, the second
-pass sends a trigger request for that alpha, then waits and polls that same
-alpha. It moves to the next failed ID only after a numeric value arrives. This
-trigger uses BRAIN's submission endpoint and may activate an alpha if it passes
-submission checks. If the value remains pending until the timeout, the pass
+pass sends a trigger request for that alpha, then polls BRAIN's `/alphas/{id}/submit` endpoint for the verdict. It moves
+to the next failed ID only after a numeric value arrives. The trigger uses BRAIN's submission endpoint and may activate an alpha if it
+passes submission checks; the verdict is read from that endpoint's polling
+response rather than the alpha detail endpoint. If the value remains pending until the timeout, the pass
 saves progress and stops at that alpha. The trigger ledger ensures a resumed
 run polls the existing check instead of sending a duplicate trigger.
 
@@ -700,8 +700,9 @@ Selection alone does not submit an alpha. The regular pipeline asks for an
 explicit `yes` before each submission unless `--auto-submit` is used. Pipeline
 2 uses automatic submission for the supplied batch. Its failed-alpha pass may
 send a trigger request through BRAIN’s submit endpoint when no numeric
-self-correlation value exists; it waits for that value before moving on. A
-persistent trigger ledger prevents repeating a trigger after an interrupted wait.
+self-correlation value exists; it polls that same endpoint for the verdict and
+waits for a value before moving on. A persistent trigger ledger prevents
+repeating a trigger after an interrupted wait.
 
 ---
 
