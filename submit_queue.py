@@ -1,5 +1,6 @@
 """Review and submit Alpha IDs one at a time, saving structured outcomes."""
 
+import argparse
 import json
 import sys
 import time
@@ -47,18 +48,19 @@ def _failed_record(alpha_id: str, message: str) -> dict[str, Any]:
 
 
 def main() -> int:
-    args = sys.argv[1:]
-    if not args:
-        print(__doc__)
-        return 1
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--file", help="File containing Alpha IDs (JSON array or one ID per line).")
+    parser.add_argument("--yes-all", action="store_true",
+                        help="Submit eligible queue items without per-alpha prompts.")
+    parser.add_argument("alpha_ids", nargs="*", help="Alpha IDs to process directly.")
+    args = parser.parse_args()
 
-    if args[0] == "--file":
-        if len(args) < 2:
-            print("Usage: python submit_queue.py --file <path>")
-            return 1
-        alpha_ids = load_ids_from_file(args[1])
+    if args.file and args.alpha_ids:
+        parser.error("Provide either --file or positional Alpha IDs, not both.")
+    if args.file:
+        alpha_ids = load_ids_from_file(args.file)
     else:
-        alpha_ids = args
+        alpha_ids = args.alpha_ids
 
     if not alpha_ids:
         print("No alpha IDs to process.")
@@ -86,13 +88,60 @@ def main() -> int:
             continue
 
         show_summary(alpha)
-        try:
-            choice = input(
-                f"\n[{index + 1}/{len(alpha_ids)}] Type 'yes' to submit {alpha_id}, "
-                "'skip' to move to the next one, or 'stop' to end the queue here: "
-            ).strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            choice = "stop"
+        brain_status = str(alpha.get("status") or "UNKNOWN")
+        checks = (alpha.get("is") or {}).get("checks", []) or []
+        failed_self_corr = [
+            check for check in checks
+            if check.get("name") == "SELF_CORRELATION" and check.get("result") == "FAIL"
+        ]
+
+        if brain_status == "ACTIVE":
+            print(f"{alpha_id} is already ACTIVE; no new submission request sent.")
+            records.append({
+                "alpha_id": alpha_id,
+                "outcome": "active",
+                "brain_status": brain_status,
+                "attempts": 0,
+                "message": "Already ACTIVE before this queue run; no new request sent.",
+                "failed_checks": [],
+            })
+            continue
+
+        if args.yes_all and failed_self_corr:
+            print(f"Skipping {alpha_id}: SELF_CORRELATION already fails before submission.")
+            records.append({
+                "alpha_id": alpha_id,
+                "outcome": "failed",
+                "brain_status": brain_status,
+                "attempts": 0,
+                "message": "Auto-submit skipped because SELF_CORRELATION already fails.",
+                "failed_checks": failed_self_corr,
+            })
+            continue
+
+        if args.yes_all and brain_status != "UNSUBMITTED":
+            print(f"Skipping {alpha_id}: existing BRAIN status is {brain_status}; no duplicate request sent.")
+            records.append({
+                "alpha_id": alpha_id,
+                "outcome": "skipped",
+                "brain_status": brain_status,
+                "attempts": 0,
+                "message": "Auto-submit only sends new requests for UNSUBMITTED alphas.",
+                "failed_checks": [],
+            })
+            continue
+
+        if args.yes_all:
+            print("Auto-submit enabled; submitting this eligible alpha without a prompt.")
+            choice = "yes"
+        else:
+            try:
+                choice = input(
+                    f"\n[{index + 1}/{len(alpha_ids)}] Type 'yes' to submit {alpha_id}, "
+                    "'skip' to move to the next one, or 'stop' to end the queue here: "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                choice = "stop"
 
         if choice == "stop":
             print("Stopping queue — remaining alphas were not processed.")
@@ -111,7 +160,7 @@ def main() -> int:
             records.append({
                 "alpha_id": alpha_id,
                 "outcome": "skipped",
-                "brain_status": alpha.get("status"),
+                "brain_status": brain_status,
                 "attempts": 0,
                 "message": "User skipped this alpha.",
                 "failed_checks": [],
@@ -142,4 +191,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

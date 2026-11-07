@@ -253,7 +253,8 @@ The queue writes structured results to `data/submit_queue_output.json`.
 The pipeline then runs `create_submission_output.py`, `filter_alphas.py`, and
 `get_failed_submissions_ids.py` to create `data/submission_output.json`,
 `data/active_alphas.json`, `data/failed_submissions.json`, and
-`data/failed_id_submissions.json`.
+`data/failed_id_submissions.json`. `--auto-submit` removes individual prompts;
+the default mode continues to ask before each alpha.
 
 ## Project Structure
 
@@ -478,14 +479,19 @@ is marked failed; fix the reported issue and run the command again.
 
 Individual stage scripts can still be run directly when needed.
 
-There is no startup submission prompt. When the full pipeline completes
-selection, it creates `data/top25_alpha_ids.json` and starts the queue. If you
-run selection separately, create the ID list with `python top25_id_retriever.py`.
+For the 500-simulation workflow, replace `data/alpha_ids.txt` with the next
+batch of 100 IDs and run `python run_pipeline.py --no-submit` for the first
+four batches. The fetch cache retains earlier results, so selection and the
+watchlist cover the accumulated pool. On the fifth batch, run
+`python run_pipeline.py --auto-submit` to send the eligible top-25 queue
+without per-alpha prompts, or omit the flag to confirm each alpha manually.
+Auto-submit skips alphas already ACTIVE or with a failed self-correlation check.
 
 ### Submission
 
-The full pipeline starts the queue automatically after selection. To extract
-the IDs separately, run:
+The full pipeline starts the queue automatically after selection unless
+`--no-submit` is passed. Use `--auto-submit` only when you intend to submit
+every eligible alpha in the selected batch. To extract IDs separately, run:
 
 ```bash
 python top25_id_retriever.py

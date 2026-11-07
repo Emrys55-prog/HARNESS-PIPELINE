@@ -1,5 +1,6 @@
 """Run the research stages and persist progress in pipeline state."""
 
+import argparse
 import json
 import subprocess
 import sys
@@ -93,7 +94,7 @@ def _record_selected(manager: StateManager, run_id: str) -> int:
 
 
 
-def _submit_selected_alphas() -> int:
+def _submit_selected_alphas(auto_submit: bool = False) -> int:
     retriever = ROOT / "top25_id_retriever.py"
     result = subprocess.run([sys.executable, str(retriever)], cwd=ROOT, check=False)
     if result.returncode != 0:
@@ -102,11 +103,10 @@ def _submit_selected_alphas() -> int:
 
     ids_path = DATA / "top25_alpha_ids.json"
     print(f"Starting submission queue from {ids_path.relative_to(ROOT)}.")
-    queue_result = subprocess.run(
-        [sys.executable, str(ROOT / "submit_queue.py"), "--file", str(ids_path)],
-        cwd=ROOT,
-        check=False,
-    )
+    queue_command = [sys.executable, str(ROOT / "submit_queue.py"), "--file", str(ids_path)]
+    if auto_submit:
+        queue_command.append("--yes-all")
+    queue_result = subprocess.run(queue_command, cwd=ROOT, check=False)
 
     processors = (
         "create_submission_output.py",
@@ -122,6 +122,20 @@ def _submit_selected_alphas() -> int:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--auto-submit",
+        action="store_true",
+        help="Skip per-alpha prompts for eligible, non-failing submissions.",
+    )
+    mode.add_argument(
+        "--no-submit",
+        action="store_true",
+        help="Run research and selection stages without starting the queue.",
+    )
+    args = parser.parse_args()
+
     ids_path = DATA / "alpha_ids.txt"
     alpha_ids = _load_ids(ids_path)
     if not alpha_ids:
@@ -174,9 +188,16 @@ def main() -> int:
         manager.complete_run(run_id)
         print(f"Pipeline run {run_id} completed; selected candidates: {selected_count}.")
 
+        if args.no_submit:
+            print("Submission queue skipped by --no-submit; selected and watchlist files are ready.")
+            return 0
+
         print("Starting the selected-alpha submission queue.")
-        print("The queue will ask for confirmation for each alpha.")
-        return _submit_selected_alphas()
+        if args.auto_submit:
+            print("Auto-submit enabled for eligible alphas; failed self-correlation checks will be skipped.")
+        else:
+            print("The queue will ask for confirmation for each alpha.")
+        return _submit_selected_alphas(auto_submit=args.auto_submit)
 
     except Exception as exc:
         manager.record_failure(stage, str(exc), run_id=run_id)
