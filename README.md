@@ -437,7 +437,7 @@ A private repository is not a substitute for proper secret management.
 | Manual ID input | `data/alpha_ids.txt`; IDs are entered manually |
 | Alpha fetcher | `fetch_alphas.py`; writes fetched records under `data/` |
 | Organizer | `organize_alphas.py`; groups records using the local field cache |
-| Selector | `select_alphas.py`; writes a diversified shortlist of up to 25 |
+| Selector | `select_alphas.py`; writes the top-25 review batch and `data/watchlist_alphas.json` for the rest |
 | Pipeline runner | `run_pipeline.py`; coordinates stages and records run state |
 | Field cache fetcher | `src/harness_pipeline/fields/fields.py`; fetches BRAIN metadata and caches it locally |
 | Field catalog | `src/harness_pipeline/fields/catalog.py`; reusable field lookup and validation |
@@ -471,8 +471,9 @@ python run_pipeline.py
 
 The runner loads or fetches the USA TOP3000 delay 1 field cache, then runs
 fetch, organization, and selection in order. It stores checkpoints, failures,
-and selected candidates in `data/pipeline_state.json`. Outputs include
-`data/top25_alphas.json` and `data/top25_alphas.csv`. If a stage fails, the run
+and selected candidates in `data/pipeline_state.json`. Outputs include `data/top25_alphas.json` and `data/top25_alphas.csv` for the
+first 25 candidates, plus `data/watchlist_alphas.json` containing the other
+eligible candidates for later review. If a stage fails, the run
 is marked failed; fix the reported issue and run the command again.
 
 Individual stage scripts can still be run directly when needed.
@@ -530,6 +531,7 @@ data/
 ├── alphas_by_field.csv
 ├── top25_alphas.json
 ├── top25_alphas.csv
+├── watchlist_alphas.json
 ├── top25_alpha_ids.json
 ├── submit_queue_output.json
 ├── submission_output.json

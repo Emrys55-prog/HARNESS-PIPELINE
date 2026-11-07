@@ -10,6 +10,7 @@ DATA_DIR.mkdir(exist_ok=True)
 INPUT_FILE = DATA_DIR / "alphas_by_field.json"
 OUTPUT_JSON = BASE_DIR / "data" / "top25_alphas.json"
 OUTPUT_CSV = BASE_DIR / "data" / "top25_alphas.csv"
+WATCHLIST_JSON = BASE_DIR / "data" / "watchlist_alphas.json"
 
 TARGET_COUNT = 25
 MAX_PER_FIELD_GROUP = 3
@@ -187,14 +188,31 @@ def main():
             if len(selected) >= TARGET_COUNT:
                 break
 
+    watchlist = []
+    for record in records:
+        if record["id"] not in selected_ids:
+            watchlist_record = dict(record)
+            watchlist_record["watchlist_reason"] = (
+                "Not selected in the current top-25 review batch; retained for future review."
+            )
+            watchlist.append(watchlist_record)
+
     output = {
         "selection_method": "ranked performance with field-family diversity",
         "total_candidates": len(records),
         "selected_count": len(selected),
+        "watchlist_count": len(watchlist),
         "alphas": selected,
+    }
+    watchlist_output = {
+        "selection_method": output["selection_method"],
+        "total_candidates": len(records),
+        "watchlist_count": len(watchlist),
+        "alphas": watchlist,
     }
 
     save_json(OUTPUT_JSON, output)
+    save_json(WATCHLIST_JSON, watchlist_output)
 
     if selected:
         columns = [
@@ -227,9 +245,11 @@ def main():
 
     print("\nSelection complete.")
     print(f"Candidates evaluated: {len(records)}")
-    print(f"Selected: {len(selected)}")
+    print(f"Selected for review: {len(selected)}")
+    print(f"Retained on watchlist: {len(watchlist)}")
     print(f"JSON: {OUTPUT_JSON}")
     print(f"CSV:  {OUTPUT_CSV}")
+    print(f"Watchlist JSON: {WATCHLIST_JSON}")
 
     print("\nSelected alphas:")
     for i, record in enumerate(selected, 1):
