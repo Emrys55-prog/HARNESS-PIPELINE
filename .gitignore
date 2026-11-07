@@ -6,3 +6,5 @@ __pycache__/
 .wq_session_cookies.pkl
 logs/
 data/
+
+h -u origin HEAD

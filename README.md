@@ -12,11 +12,12 @@ The project aims to transform manually discovered alpha candidates into a struct
 
 ## Table of Contents
 
-- [FIELD CACHING](fieldcaching)
+
 - [Overview](#overview)
 - [Objectives](#objectives)
 - [Research Workflow](#research-workflow)
 - [Architecture](#architecture)
+  - [BRAIN Field Metadata and Cache](#brain-field-metadata-and-cache)
 - [Project Structure](#project-structure)
 - [Technology Stack](#technology-stack)
 - [Prerequisites](#prerequisites)
@@ -32,6 +33,7 @@ The project aims to transform manually discovered alpha candidates into a struct
 - [Troubleshooting](#troubleshooting)
 - [Roadmap](#roadmap)
 - [Disclaimer](#disclaimer)
+- [Author](#author)
 
 ---
 
@@ -87,48 +89,29 @@ The pipeline is not intended to:
 The intended end-to-end workflow:
 
 ```text
-Alpha Harness
-     |
-     | User copies Submitable results
-     v
-Manual Alpha ID Input
-     |
-     v
-alpha_ids.txt
-     |
-     v
-WorldQuant BRAIN Alpha Retrieval
-     |
-     v
-Raw Alpha Records
-     |
-     v
-Field / Family Organization
-     |
-     v
-Candidate Scoring and Diversification
-     |
-     v
-Top Candidate Pool
-     |
-     v
-Manual Correlation Review
-     |
-     v
-Correlation Breaker (when needed)
-     |
-     v
-Re-fetch and Re-evaluate
-     |
-     v
-Approved Submission Queue
-     |
-     v
-Controlled BRAIN Submission
-     |
-     v
-Submission Tracking and Research History
+Alpha Harness results
+        |
+        v
+Manual Alpha ID Input (data/alpha_ids.txt)
+        |
+        v
+BRAIN retrieval, organization, and selection
+        |
+        v
+Selected candidates (data/top25_alphas.json)
+        |
+        v
+ID extraction (data/top25_alpha_ids.json)
+        |
+        v
+Submission queue starts automatically
+        |
+        v
+Per-alpha confirmation, then optional submission
 ```
+
+Correlation review and any Correlation Breaker work remain separate manual
+steps; they are not currently run by `run_pipeline.py`.
 
 The Alpha Harness discovery stage remains user-controlled. The pipeline begins when candidate results are provided to it.
 
@@ -256,27 +239,15 @@ Correlation Breaker operations remain manual unless a future implementation expl
 
 ### 6. Submission management
 
-`submit_queue.py` processes approved alpha IDs sequentially and asks for
-confirmation before each submission. It depends on `submit.py`, which
-provides the alpha retrieval, review summary, and submission functions used
-by the queue.
+After candidate selection, `run_pipeline.py` automatically runs
+`top25_id_retriever.py` to extract IDs from `data/top25_alphas.json` into
+`data/top25_alpha_ids.json`, then starts `submit_queue.py` with that list.
 
-Run the queue with IDs as arguments:
-
-```bash
-python submit_queue.py ID1 ID2 ID3
-```
-
-Or use a text file containing one ID per line:
-
-```bash
-python submit_queue.py --file data/submission_queue.txt
-```
-
-Type `yes` to submit the displayed alpha, `skip` to continue without
-submitting it, or `stop` to end the queue. The queue reports submitted,
-skipped, and failed IDs. It does not maintain a persistent submission
-history.
+The queue uses `submit.py` to retrieve and display each alpha. Type `yes` to
+submit the displayed alpha, `skip` to continue without submitting it, or
+`stop` to end the queue. There is no startup Yes/No prompt, but each alpha
+still requires its own confirmation. The queue reports submitted, skipped,
+and failed IDs; it does not maintain a persistent submission history.
 
 ## Project Structure
 
@@ -289,10 +260,13 @@ HARNESS-PIPELINE/
 ├── organize_alphas.py
 ├── select_alphas.py
 ├── run_pipeline.py
+├── top25_id_retriever.py
 ├── submit_queue.py
 ├── submit.py
 ├── data/
 │   ├── alpha_ids.txt
+│   ├── top25_alphas.json
+│   ├── top25_alpha_ids.json
 │   └── field_cache/
 ├── src/harness_pipeline/
 │   ├── fields/       # Field fetcher, catalog, and field rules
@@ -301,10 +275,9 @@ HARNESS-PIPELINE/
     └── test_state.py
 ```
 
-The submission queue calls functions from `submit.py`; both files are
-needed for queue-based submission. The field catalog and state manager
- are available as package components, but the standalone workflow scripts
-do not currently call them.
+The pipeline uses `top25_id_retriever.py` to extract selected IDs and then
+starts `submit_queue.py` with the generated JSON file. The queue calls
+functions from `submit.py` and asks for confirmation before each submission.
 
 ## Technology Stack
 
@@ -458,11 +431,13 @@ A private repository is not a substitute for proper secret management.
 | Field cache fetcher | `src/harness_pipeline/fields/fields.py`; fetches BRAIN metadata and caches it locally |
 | Field catalog | `src/harness_pipeline/fields/catalog.py`; reusable field lookup and validation |
 | Run manager | `src/harness_pipeline/state/manager.py`; reusable run tracking |
-| Submission queue | `submit_queue.py`; uses `submit.py` and asks before each submission |
+| Alpha ID retriever | `top25_id_retriever.py`; extracts selected IDs to `data/top25_alpha_ids.json` |
+| Submission queue | `submit_queue.py`; started by the pipeline and asks before each alpha submission |
 
 `run_pipeline.py` uses the field fetcher and `FieldCatalog`, then records
 stage checkpoints, fetch failures, and selected candidates with `StateManager`.
-The submission queue remains a separate, manually confirmed step.
+After selection, it extracts the Alpha IDs and starts the queue automatically;
+the queue still requires confirmation for each alpha.
 
 ### Manual Alpha ID input
 
@@ -486,17 +461,30 @@ is marked failed; fix the reported issue and run the command again.
 
 Individual stage scripts can still be run directly when needed.
 
+There is no startup submission prompt. When the full pipeline completes
+selection, it creates `data/top25_alpha_ids.json` and starts the queue. If you
+run selection separately, create the ID list with `python top25_id_retriever.py`.
+
 ### Submission
 
-After choosing IDs for submission, run:
+The full pipeline starts the queue automatically after selection. To extract
+the IDs separately, run:
 
 ```bash
-python submit_queue.py ID1 ID2 ID3
+python top25_id_retriever.py
+```
+
+This reads `data/top25_alphas.json` and writes a JSON array to
+`data/top25_alpha_ids.json`. To start the queue directly from that file:
+
+```bash
+python submit_queue.py --file data/top25_alpha_ids.json
 ```
 
 The queue imports `get_alpha`, `show_summary`, and `submit_alpha` from
 `submit.py`. It displays each alpha and requires a separate `yes`
-confirmation before submitting it.
+confirmation before submitting it; `skip` moves to the next alpha and `stop`
+ends the queue.
 
 ## Research Data Management
 
@@ -513,7 +501,7 @@ data/
 ├── alphas_by_field.csv
 ├── top25_alphas.json
 ├── top25_alphas.csv
-├── submission_queue.json
+├── top25_alpha_ids.json
 └── run_history.json
 ```
 
@@ -566,7 +554,7 @@ A candidate should not automatically become submission-approved simply because i
 
 ## Submission Controls
 
-Submission is a controlled operation and should remain isolated from candidate generation.
+The pipeline starts the submission queue after candidate selection. Submission remains a separate decision for each alpha because the queue requires individual confirmation.
 
 Before submission, candidates should have:
 
@@ -589,9 +577,9 @@ The pipeline should maintain a record of:
 
 ### Important
 
-Do not submit candidates automatically merely because they appear in the top-ranked shortlist.
-
-Selection, correlation review, and submission are separate decisions.
+Selection alone does not submit an alpha. Although the pipeline starts the
+queue automatically after selection, each alpha requires an explicit `yes`
+response in the queue before `submit.py` sends a submission request.
 
 ---
 
@@ -717,6 +705,7 @@ Do not commit until the credential file is correctly excluded.
 - [x] Add field-based organization.
 - [x] Add diversified top-25 selection.
 - [x] Add the sequential submission queue and its `submit.py` helper.
+- [x] Extract selected top-25 IDs and start the confirmed queue from `run_pipeline.py`.
 - [x] Add the field metadata fetcher, local cache, field catalog, and persistent run state manager.
 - [x] Add tests for the state manager.
 - [ ] Integrate correlation review tracking.
@@ -738,3 +727,4 @@ All candidates remain subject to WorldQuant BRAIN's evaluation, platform require
 **HARNESS PIPELINE**
 
 A modular quantitative research automation project focused on improving the organization, evaluation, diversification, and management of WorldQuant BRAIN alpha candidates.
+

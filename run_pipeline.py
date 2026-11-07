@@ -92,6 +92,24 @@ def _record_selected(manager: StateManager, run_id: str) -> int:
     return count
 
 
+
+def _submit_selected_alphas() -> int:
+    retriever = ROOT / "top25_id_retriever.py"
+    result = subprocess.run([sys.executable, str(retriever)], cwd=ROOT, check=False)
+    if result.returncode != 0:
+        print("Could not create the selected Alpha ID list; queue was not started.", file=sys.stderr)
+        return result.returncode
+
+    ids_path = DATA / "top25_alpha_ids.json"
+    print(f"Starting submission queue from {ids_path.relative_to(ROOT)}.")
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "submit_queue.py"), "--file", str(ids_path)],
+        cwd=ROOT,
+        check=False,
+    )
+    return result.returncode
+
+
 def main() -> int:
     ids_path = DATA / "alpha_ids.txt"
     alpha_ids = _load_ids(ids_path)
@@ -144,8 +162,10 @@ def main() -> int:
         )
         manager.complete_run(run_id)
         print(f"Pipeline run {run_id} completed; selected candidates: {selected_count}.")
-        print("Review data/top25_alphas.json, then submit chosen IDs with submit_queue.py.")
-        return 0
+
+        print("Starting the selected-alpha submission queue.")
+        print("The queue will ask for confirmation for each alpha.")
+        return _submit_selected_alphas()
 
     except Exception as exc:
         manager.record_failure(stage, str(exc), run_id=run_id)
@@ -156,3 +176,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

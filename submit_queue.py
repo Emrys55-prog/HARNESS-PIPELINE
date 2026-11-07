@@ -11,23 +11,29 @@ not the judgment step itself.
 
 Usage:
     python submit_queue.py <alpha_id_1> <alpha_id_2> <alpha_id_3> ...
-
-    python submit_queue.py KPNMeQNz O0NXv7vd 1YZVjpa6
-
-Or from a file (one alpha ID per line):
-    python submit_queue.py --file queue.txt
+    python submit_queue.py --file data/top25_alpha_ids.json
+    python submit_queue.py --file queue.txt  # one alpha ID per line
 """
 
+import json
 import sys
 import time
+from pathlib import Path
 
 from auth import WQSession
 from submit import get_alpha, show_summary, submit_alpha
 
 
 def load_ids_from_file(path: str) -> list[str]:
-    with open(path) as f:
-        return [line.strip() for line in f if line.strip() and not line.startswith("#")]
+    source = Path(path)
+    content = source.read_text(encoding="utf-8")
+    if source.suffix.lower() == ".json":
+        values = json.loads(content)
+        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+            raise ValueError(f"Expected a JSON array of Alpha ID strings in {source}.")
+        return [value.strip() for value in values if value.strip()]
+    return [line.strip() for line in content.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")]
 
 
 def main():
