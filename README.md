@@ -452,7 +452,7 @@ A private repository is not a substitute for proper secret management.
 | Organizer | `organize_alphas.py`; groups records using the local field cache |
 | Selector | `select_alphas.py`; writes the top-25 review batch and `data/watchlist_alphas.json` for the rest |
 | Pipeline runner | `run_pipeline.py`; coordinates research stages and records run state |
-| Pipeline 2 runner | `run_pipeline_2.py`; submits a full ID batch, refreshes its status without resubmitting, and prepares correlation-review IDs |
+| Pipeline 2 runner | `run_pipeline_2.py`; submits the batch, then triggers and waits for self-correlation on failed IDs one at a time |
 | Field cache fetcher | `src/harness_pipeline/fields/fields.py`; fetches BRAIN metadata and caches it locally |
 | Field catalog | `src/harness_pipeline/fields/catalog.py`; reusable field lookup and validation |
 | Run manager | `src/harness_pipeline/state/manager.py`; reusable run tracking |
@@ -542,14 +542,23 @@ contains failed records; skipped records remain in `submission_output.json`.
 
 Pipeline 2 reads the complete ID batch from `data/alpha_ids.txt` by default.
 It submits eligible alphas automatically, saves the first-pass queue output,
-then runs `submit_queue.py` a second time in read-only mode. The second pass
-refreshes each alpha's BRAIN status and checks without sending another
-submission request.
+then extracts only failed Alpha IDs for a sequential correlation pass. For
+each failed alpha, it triggers the BRAIN check and waits for a numeric
+`SELF_CORRELATION` value before moving to the next ID. If a value does not
+arrive before the timeout, the queue saves its partial results and stops at
+that alpha so the unresolved check can be resumed.
 
 Run it from the project root:
 
 ```bash
 python run_pipeline_2.py
+```
+
+To run the sequential correlation pass on the failed alphas from an existing
+Pipeline 2 run, without rerunning the full original batch, run:
+
+```bash
+python run_pipeline_2.py --refresh-existing
 ```
 
 To use another ID file or change the strict correlation cutoff:
@@ -562,16 +571,26 @@ Pipeline 2 writes its reports under `data/pipeline_2/`, preserving the regular
 pipeline's output files:
 
 - `submit_queue_output.json` — first-pass submission outcomes.
-- `status_check_output.json` — refreshed statuses and checks from the read-only
-  second pass.
+- `failed_ids_to_check.json` — only failed IDs sent to the sequential correlation pass.
+- `correlation_triggered_ids.json` — prevents repeating a trigger after an interrupted wait.
+- `status_check_output.json` — trigger results and full checks for failed IDs.
+- `combined_queue_output.json` — original active results plus refreshed failed results.
 - `submission_output.json` — normalized second-pass results.
 - `active_alphas.json` and `failed_submissions.json` — separated outcomes.
 - `correlation_breaker_ids.json` — IDs from failed records whose
   `SELF_CORRELATION` value is strictly below 0.8.
 
+When a failed alpha has no numeric self-correlation value yet, the second
+pass sends a trigger request for that alpha, then waits and polls that same
+alpha. It moves to the next failed ID only after a numeric value arrives. This
+trigger uses BRAIN's submission endpoint and may activate an alpha if it passes
+submission checks. If the value remains pending until the timeout, the pass
+saves progress and stops at that alpha. The trigger ledger ensures a resumed
+run polls the existing check instead of sending a duplicate trigger.
+
 The correlation filter only selects records that include a numeric
-`SELF_CORRELATION` value. Pending or missing correlation values are not added
-to the Correlation Breaker ID list.
+`SELF_CORRELATION` value below 0.8. Pending or missing values are not added to
+the Correlation Breaker ID list.
 
 ## Research Data Management
 
@@ -598,6 +617,7 @@ data/
 └── pipeline_2/
     ├── submit_queue_output.json
     ├── status_check_output.json
+    ├── correlation_triggered_ids.json
     ├── submission_output.json
     ├── active_alphas.json
     ├── failed_submissions.json
@@ -653,7 +673,7 @@ A candidate should not automatically become submission-approved simply because i
 
 ## Submission Controls
 
-The regular pipeline starts the submission queue after candidate selection and asks for confirmation per alpha by default. Pipeline 2 is a separate full-batch workflow that submits eligible IDs automatically, then refreshes status in a read-only second pass.
+The regular pipeline starts the submission queue after candidate selection and asks for confirmation per alpha by default. Pipeline 2 submits the batch automatically, then processes failed IDs sequentially through the correlation trigger and waits for each numeric result.
 
 Before submission, candidates should have:
 
@@ -678,8 +698,10 @@ The pipeline should maintain a record of:
 
 Selection alone does not submit an alpha. The regular pipeline asks for an
 explicit `yes` before each submission unless `--auto-submit` is used. Pipeline
-2 uses automatic submission for the supplied batch; its second queue pass is
-read-only and does not send duplicate requests.
+2 uses automatic submission for the supplied batch. Its failed-alpha pass may
+send a trigger request through BRAIN’s submit endpoint when no numeric
+self-correlation value exists; it waits for that value before moving on. A
+persistent trigger ledger prevents repeating a trigger after an interrupted wait.
 
 ---
 
@@ -806,7 +828,7 @@ Do not commit until the credential file is correctly excluded.
 - [x] Add diversified top-25 selection.
 - [x] Add the sequential submission queue and its `submit.py` helper.
 - [x] Add one-check submission verification and JSON active/failed result processing.
-- [x] Add Pipeline 2 for full-batch submission, read-only status refresh, and correlation-based ID filtering.
+- [x] Add Pipeline 2 for full-batch submission, sequential self-correlation checks, persistent trigger tracking, and correlation-based ID filtering.
 - [x] Extract selected top-25 IDs and start the confirmed queue from `run_pipeline.py`.
 - [x] Add the field metadata fetcher, local cache, field catalog, and persistent run state manager.
 - [x] Add tests for the state manager.
@@ -829,6 +851,7 @@ All candidates remain subject to WorldQuant BRAIN's evaluation, platform require
 **HARNESS PIPELINE**
 
 A modular quantitative research automation project focused on improving the organization, evaluation, diversification, and management of WorldQuant BRAIN alpha candidates.
+
 
 
 

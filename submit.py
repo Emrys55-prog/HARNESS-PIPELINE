@@ -1,5 +1,6 @@
 """Review, submit, and verify one WorldQuant BRAIN alpha."""
 
+import math
 import sys
 import time
 from typing import Any
@@ -38,6 +39,78 @@ def get_alpha(session: requests.Session, alpha_id: str) -> dict:
     if resp.status_code != 200:
         raise RuntimeError(f"Could not fetch alpha {alpha_id}: {resp.status_code} {resp.text}")
     return resp.json()
+
+
+def self_correlation_check(alpha: dict) -> dict[str, Any] | None:
+    checks = alpha.get("is", {}).get("checks", []) or []
+    return next(
+        (check for check in checks if check.get("name") == "SELF_CORRELATION"),
+        None,
+    )
+
+
+def numeric_check_value(check: dict[str, Any] | None) -> float | None:
+    if not check:
+        return None
+    try:
+        value = float(check.get("value"))
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def trigger_and_wait_for_self_correlation(
+    session: requests.Session,
+    alpha_id: str,
+    initial_alpha: dict[str, Any],
+    timeout_seconds: float = 900,
+    poll_interval_seconds: float = 15,
+    send_trigger: bool = True,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Trigger a BRAIN check, then wait for its numeric SELF_CORRELATION value."""
+    current_alpha = initial_alpha
+    existing_check = self_correlation_check(current_alpha)
+    if numeric_check_value(existing_check) is not None:
+        return current_alpha, existing_check
+
+    if send_trigger:
+        response = _request_with_retry(
+            session, "POST", f"{BRAIN_API_BASE}/alphas/{alpha_id}/submit"
+        )
+    else:
+        response = None
+
+    if response is not None and response.status_code == 403:
+        try:
+            rejected_alpha = response.json()
+            if isinstance(rejected_alpha, dict) and rejected_alpha.get("is"):
+                current_alpha = rejected_alpha
+                existing_check = self_correlation_check(current_alpha)
+                if numeric_check_value(existing_check) is not None:
+                    return current_alpha, existing_check
+        except (ValueError, TypeError):
+            pass
+        print(f"  BRAIN rejected {alpha_id}; waiting for the check value to appear.")
+    elif response is not None and response.status_code not in (200, 201):
+        raise RuntimeError(f"Correlation trigger failed: {response.status_code} {response.text}")
+    elif response is not None:
+        print(f"  Correlation check triggered for {alpha_id} (HTTP {response.status_code}).")
+    else:
+        print(f"  Continuing to wait for the existing check on {alpha_id}.")
+
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        check = self_correlation_check(current_alpha)
+        value = numeric_check_value(check)
+        if value is not None:
+            return current_alpha, check
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return current_alpha, None
+
+        time.sleep(min(poll_interval_seconds, remaining))
+        current_alpha = get_alpha(session, alpha_id)
 
 
 def show_summary(alpha: dict) -> None:

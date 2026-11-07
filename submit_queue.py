@@ -9,7 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from auth import WQSession
-from submit import get_alpha, show_summary, submit_alpha
+from submit import (
+    get_alpha, numeric_check_value, self_correlation_check, show_summary,
+    submit_alpha, trigger_and_wait_for_self_correlation,
+)
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = ROOT / "data" / "submit_queue_output.json"
@@ -56,10 +59,24 @@ def main() -> int:
                         help="Path for structured queue results.")
     parser.add_argument("--check-only", action="store_true",
                         help="Refresh alpha status and checks without sending submission requests.")
+    parser.add_argument("--trigger-correlation", action="store_true",
+                        help="Trigger self-correlation for each alpha and wait for its numeric value before continuing.")
+    parser.add_argument("--correlation-timeout", type=float, default=900,
+                        help="Maximum seconds to wait for each numeric self-correlation value (default: 900).")
+    parser.add_argument("--trigger-ledger", type=Path,
+                        default=ROOT / "data" / "pipeline_2" / "correlation_triggered_ids.json",
+                        help="Persistent IDs whose correlation trigger was already sent.")
     parser.add_argument("alpha_ids", nargs="*", help="Alpha IDs to process directly.")
     args = parser.parse_args()
 
     output_path = args.output
+
+    if args.trigger_correlation and args.check_only:
+        parser.error("--trigger-correlation cannot be combined with --check-only.")
+    if args.trigger_correlation and not args.yes_all:
+        parser.error("--trigger-correlation requires --yes-all.")
+    if args.correlation_timeout <= 0:
+        parser.error("--correlation-timeout must be greater than zero.")
 
     if args.file and args.alpha_ids:
         parser.error("Provide either --file or positional Alpha IDs, not both.")
@@ -75,6 +92,17 @@ def main() -> int:
 
     print(f"Queue: {len(alpha_ids)} alpha(s) — {', '.join(alpha_ids)}\n")
     records: list[dict[str, Any]] = []
+    triggered_ids: set[str] = set()
+    if args.trigger_correlation and args.trigger_ledger.exists():
+        ledger_payload = json.loads(args.trigger_ledger.read_text(encoding="utf-8"))
+        if not isinstance(ledger_payload, list) or any(not isinstance(value, str) for value in ledger_payload):
+            parser.error(f"Expected a JSON array of triggered Alpha IDs in {args.trigger_ledger}.")
+        triggered_ids = set(ledger_payload)
+
+    def save_trigger_ledger() -> None:
+        args.trigger_ledger.parent.mkdir(parents=True, exist_ok=True)
+        args.trigger_ledger.write_text(json.dumps(sorted(triggered_ids), indent=2) + "\n", encoding="utf-8")
+
     session = WQSession()
     try:
         session.login()
@@ -91,6 +119,89 @@ def main() -> int:
         except Exception as exc:
             print(f"Could not fetch {alpha_id}: {exc} — recording as failed.")
             records.append(_failed_record(alpha_id, f"Could not fetch alpha: {exc}"))
+            if args.trigger_correlation:
+                write_queue_output(records, output_path)
+                if "404" in str(exc):
+                    print("Alpha is unavailable (404); moving to the next failed ID.")
+                    continue
+                print("Stopping this sequential run; the current alpha could not be fetched.")
+                return 2
+            continue
+
+        if args.trigger_correlation:
+            if str(alpha.get("status") or "") == "ACTIVE":
+                checks = (alpha.get("is") or {}).get("checks", []) or []
+                print(f"{alpha_id} is already ACTIVE; no correlation trigger sent.")
+                records.append({
+                    "alpha_id": alpha_id,
+                    "outcome": "active",
+                    "brain_status": "ACTIVE",
+                    "attempts": 0,
+                    "message": "Already ACTIVE; skipped correlation-trigger submission.",
+                    "failed_checks": [],
+                    "checks": checks,
+                })
+                write_queue_output(records, output_path)
+                continue
+
+            try:
+                has_numeric_value = numeric_check_value(self_correlation_check(alpha)) is not None
+                send_trigger = not has_numeric_value and alpha_id not in triggered_ids
+                if send_trigger:
+                    # Write before POST so a timeout or interrupted response cannot duplicate the trigger.
+                    triggered_ids.add(alpha_id)
+                    save_trigger_ledger()
+                alpha, self_corr = trigger_and_wait_for_self_correlation(
+                    session.session,
+                    alpha_id,
+                    alpha,
+                    timeout_seconds=args.correlation_timeout,
+                    send_trigger=send_trigger,
+                )
+            except Exception as exc:
+                print(f"Could not complete the correlation check for {alpha_id}: {exc}")
+                records.append(_failed_record(alpha_id, f"Correlation check error: {exc}"))
+                write_queue_output(records, output_path)
+                if "404" in str(exc):
+                    print("Alpha is unavailable (404); moving to the next failed ID.")
+                    continue
+                print("Stopping before the next alpha so the unresolved check can be resumed.")
+                return 2
+
+            if self_corr is None:
+                print(f"No numeric SELF_CORRELATION value for {alpha_id} after waiting.")
+                checks = (alpha.get("is") or {}).get("checks", []) or []
+                failed_checks = [check for check in checks if check.get("result") == "FAIL"]
+                records.append({
+                    "alpha_id": alpha_id,
+                    "outcome": "failed",
+                    "brain_status": alpha.get("status"),
+                    "attempts": 1,
+                    "message": "Correlation check did not return a numeric SELF_CORRELATION value before timeout.",
+                    "failed_checks": failed_checks,
+                    "checks": checks,
+                })
+                write_queue_output(records, output_path)
+                print("Stopping before the next alpha; rerun the correlation pass to continue.")
+                return 2
+
+            checks = (alpha.get("is") or {}).get("checks", []) or []
+            failed_checks = [check for check in checks if check.get("result") == "FAIL"]
+            brain_status = str(alpha.get("status") or "UNKNOWN")
+            outcome = "active" if brain_status == "ACTIVE" else "failed"
+            print(f"  SELF_CORRELATION for {alpha_id}: {self_corr.get('value')} ({self_corr.get('result')}).")
+            records.append({
+                "alpha_id": alpha_id,
+                "outcome": outcome,
+                "brain_status": brain_status,
+                "attempts": 1,
+                "message": "Numeric SELF_CORRELATION value recorded before moving to the next alpha.",
+                "failed_checks": failed_checks,
+                "checks": checks,
+            })
+            write_queue_output(records, output_path)
+            if index < len(alpha_ids) - 1:
+                time.sleep(3)
             continue
 
         show_summary(alpha)
@@ -110,28 +221,21 @@ def main() -> int:
                 "attempts": 0,
                 "message": "Already ACTIVE before this queue run; no new request sent.",
                 "failed_checks": [],
+                "checks": checks,
             })
             continue
 
         if args.check_only:
             failed_checks = [check for check in checks if check.get("result") == "FAIL"]
-            if brain_status == "ACTIVE":
-                outcome = "active"
-                message = "BRAIN reports the alpha as ACTIVE during the read-only status pass."
-            elif failed_checks or brain_status == "UNSUBMITTED":
-                outcome = "failed"
-                message = "BRAIN reports the alpha as UNSUBMITTED or with failed checks during the read-only status pass."
-            else:
-                outcome = "skipped"
-                message = f"Read-only status pass found BRAIN status {brain_status}; no submission request was sent."
-            print(f"Read-only check: {alpha_id} is {brain_status} ({outcome}).")
+            print(f"Read-only check: {alpha_id} is {brain_status}; saved {len(checks)} check(s).")
             records.append({
                 "alpha_id": alpha_id,
-                "outcome": outcome,
+                "outcome": "failed",
                 "brain_status": brain_status,
                 "attempts": 0,
-                "message": message,
+                "message": f"Status refreshed without resubmission; current BRAIN status is {brain_status}.",
                 "failed_checks": failed_checks,
+                "checks": checks,
             })
             continue
 

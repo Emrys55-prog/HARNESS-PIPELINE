@@ -14,7 +14,7 @@ DEFAULT_THRESHOLD = 0.8
 
 def self_correlation_value(record: dict[str, Any]) -> float | None:
     """Return the SELF_CORRELATION check value when it is a finite number."""
-    checks = record.get("failed_checks") or []
+    checks = record.get("checks") or record.get("failed_checks") or []
     if not isinstance(checks, list):
         return None
 
