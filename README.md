@@ -24,6 +24,7 @@ The project aims to transform manually discovered alpha candidates into a struct
 - [Installation](#installation)
 - [Configuration and Secrets](#configuration-and-secrets)
 - [Pipeline Components](#pipeline-components)
+  - [Pipeline 2: Full-Batch Correlation Review](#pipeline-2-full-batch-correlation-review)
 - [Research Data Management](#research-data-management)
 - [Correlation and Diversification](#correlation-and-diversification)
 - [Submission Controls](#submission-controls)
@@ -110,8 +111,10 @@ Submission queue starts automatically
 Per-alpha confirmation, then optional submission
 ```
 
-Correlation review and any Correlation Breaker work remain separate manual
-steps; they are not currently run by `run_pipeline.py`.
+Correlation review and Correlation Breaker work remain separate from the
+research workflow in `run_pipeline.py`. Pipeline 2 can identify failed alphas
+with self-correlation below 0.8 and save their IDs for manual Correlation
+Breaker review.
 
 The Alpha Harness discovery stage remains user-controlled. The pipeline begins when candidate results are provided to it.
 
@@ -245,9 +248,9 @@ After candidate selection, `run_pipeline.py` automatically runs
 
 The queue uses `submit.py` to retrieve and display each alpha. Type `yes` to
 submit the displayed alpha, `skip` to continue without submitting it, or
-`stop` to end the queue. Each accepted submission is checked up to three
-times, 15 seconds apart. An alpha still marked `UNSUBMITTED` after those
-checks is recorded as failed. Each alpha still requires its own confirmation.
+`stop` to end the queue. Each accepted submission gets one status check after
+15 seconds. An alpha still marked `UNSUBMITTED` is recorded as failed. Each
+alpha still requires its own confirmation.
 
 The queue writes structured results to `data/submit_queue_output.json`.
 The pipeline then runs `create_submission_output.py`, `filter_alphas.py`, and
@@ -267,6 +270,8 @@ HARNESS-PIPELINE/
 ├── organize_alphas.py
 ├── select_alphas.py
 ├── run_pipeline.py
+├── run_pipeline_2.py
+├── correlation_breaker_ids.py
 ├── top25_id_retriever.py
 ├── submit_queue.py
 ├── submit.py
@@ -274,6 +279,13 @@ HARNESS-PIPELINE/
 ├── filter_alphas.py
 ├── get_failed_submissions_ids.py
 ├── data/
+│   ├── pipeline_2/
+│   │   ├── submit_queue_output.json
+│   │   ├── status_check_output.json
+│   │   ├── submission_output.json
+│   │   ├── active_alphas.json
+│   │   ├── failed_submissions.json
+│   │   └── correlation_breaker_ids.json
 │   ├── alpha_ids.txt
 │   ├── top25_alphas.json
 │   ├── top25_alpha_ids.json
@@ -287,7 +299,7 @@ HARNESS-PIPELINE/
 
 The pipeline extracts selected IDs, starts the confirmed submission queue,
 and then processes the queue's structured results into active and failed
-reports. `submit.py` checks each accepted request up to three times for
+reports. `submit.py` checks each accepted request once for
 `ACTIVE`; it records the final outcome instead of directing users to a separate
 status-check script.
 
@@ -439,7 +451,8 @@ A private repository is not a substitute for proper secret management.
 | Alpha fetcher | `fetch_alphas.py`; writes fetched records under `data/` |
 | Organizer | `organize_alphas.py`; groups records using the local field cache |
 | Selector | `select_alphas.py`; writes the top-25 review batch and `data/watchlist_alphas.json` for the rest |
-| Pipeline runner | `run_pipeline.py`; coordinates stages and records run state |
+| Pipeline runner | `run_pipeline.py`; coordinates research stages and records run state |
+| Pipeline 2 runner | `run_pipeline_2.py`; submits a full ID batch, refreshes its status without resubmitting, and prepares correlation-review IDs |
 | Field cache fetcher | `src/harness_pipeline/fields/fields.py`; fetches BRAIN metadata and caches it locally |
 | Field catalog | `src/harness_pipeline/fields/catalog.py`; reusable field lookup and validation |
 | Run manager | `src/harness_pipeline/state/manager.py`; reusable run tracking |
@@ -448,6 +461,7 @@ A private repository is not a substitute for proper secret management.
 | Submission output | `create_submission_output.py`; creates `data/submission_output.json` |
 | Outcome filter | `filter_alphas.py`; writes active and failed submission records |
 | Failed ID extractor | `get_failed_submissions_ids.py`; writes `data/failed_id_submissions.json` |
+| Correlation Breaker ID filter | `correlation_breaker_ids.py`; keeps failed alpha IDs with `SELF_CORRELATION` below 0.8 |
 
 `run_pipeline.py` uses the field fetcher and `FieldCatalog`, then records
 stage checkpoints, fetch failures, and selected candidates with `StateManager`.
@@ -455,6 +469,8 @@ After selection, it extracts the Alpha IDs and starts the queue automatically;
 the queue still requires confirmation for each alpha. After the queue ends, the
 runner creates the normalized submission report, splits active and failed
 records, and saves failed IDs for review or future retry.
+
+Pipeline 2 is a separate full-batch workflow for an existing ID list.
 
 ### Manual Alpha ID input
 
@@ -507,8 +523,8 @@ python submit_queue.py --file data/top25_alpha_ids.json
 The queue imports `get_alpha`, `show_summary`, and `submit_alpha` from
 `submit.py`. It displays each alpha and requires a separate `yes`
 confirmation before submitting it; `skip` moves to the next alpha and `stop`
-ends the queue. The one submission request is followed by up to three status
-checks; these checks do not repeat the submission request.
+ends the queue. The one submission request is followed by one status
+check; this check does not repeat the submission request.
 
 To process results from a queue run manually, run:
 
@@ -521,6 +537,41 @@ python get_failed_submissions_ids.py
 `active_alphas.json` contains records confirmed `ACTIVE`; `failed_submissions.json`
 contains failed records; skipped records remain in `submission_output.json`.
 `failed_id_submissions.json` is a JSON array of the failed Alpha IDs.
+
+### Pipeline 2: Full-Batch Correlation Review
+
+Pipeline 2 reads the complete ID batch from `data/alpha_ids.txt` by default.
+It submits eligible alphas automatically, saves the first-pass queue output,
+then runs `submit_queue.py` a second time in read-only mode. The second pass
+refreshes each alpha's BRAIN status and checks without sending another
+submission request.
+
+Run it from the project root:
+
+```bash
+python run_pipeline_2.py
+```
+
+To use another ID file or change the strict correlation cutoff:
+
+```bash
+python run_pipeline_2.py --file data/alpha_ids.txt --threshold 0.8
+```
+
+Pipeline 2 writes its reports under `data/pipeline_2/`, preserving the regular
+pipeline's output files:
+
+- `submit_queue_output.json` — first-pass submission outcomes.
+- `status_check_output.json` — refreshed statuses and checks from the read-only
+  second pass.
+- `submission_output.json` — normalized second-pass results.
+- `active_alphas.json` and `failed_submissions.json` — separated outcomes.
+- `correlation_breaker_ids.json` — IDs from failed records whose
+  `SELF_CORRELATION` value is strictly below 0.8.
+
+The correlation filter only selects records that include a numeric
+`SELF_CORRELATION` value. Pending or missing correlation values are not added
+to the Correlation Breaker ID list.
 
 ## Research Data Management
 
@@ -543,7 +594,14 @@ data/
 ├── submission_output.json
 ├── active_alphas.json
 ├── failed_submissions.json
-└── failed_id_submissions.json
+├── failed_id_submissions.json
+└── pipeline_2/
+    ├── submit_queue_output.json
+    ├── status_check_output.json
+    ├── submission_output.json
+    ├── active_alphas.json
+    ├── failed_submissions.json
+    └── correlation_breaker_ids.json
 ```
 
 These files represent the intended data layout and may not all exist yet.
@@ -595,7 +653,7 @@ A candidate should not automatically become submission-approved simply because i
 
 ## Submission Controls
 
-The pipeline starts the submission queue after candidate selection. Submission remains a separate decision for each alpha because the queue requires individual confirmation.
+The regular pipeline starts the submission queue after candidate selection and asks for confirmation per alpha by default. Pipeline 2 is a separate full-batch workflow that submits eligible IDs automatically, then refreshes status in a read-only second pass.
 
 Before submission, candidates should have:
 
@@ -618,9 +676,10 @@ The pipeline should maintain a record of:
 
 ### Important
 
-Selection alone does not submit an alpha. Although the pipeline starts the
-queue automatically after selection, each alpha requires an explicit `yes`
-response in the queue before `submit.py` sends a submission request.
+Selection alone does not submit an alpha. The regular pipeline asks for an
+explicit `yes` before each submission unless `--auto-submit` is used. Pipeline
+2 uses automatic submission for the supplied batch; its second queue pass is
+read-only and does not send duplicate requests.
 
 ---
 
@@ -746,7 +805,8 @@ Do not commit until the credential file is correctly excluded.
 - [x] Add field-based organization.
 - [x] Add diversified top-25 selection.
 - [x] Add the sequential submission queue and its `submit.py` helper.
-- [x] Add three-check submission verification and JSON active/failed result processing.
+- [x] Add one-check submission verification and JSON active/failed result processing.
+- [x] Add Pipeline 2 for full-batch submission, read-only status refresh, and correlation-based ID filtering.
 - [x] Extract selected top-25 IDs and start the confirmed queue from `run_pipeline.py`.
 - [x] Add the field metadata fetcher, local cache, field catalog, and persistent run state manager.
 - [x] Add tests for the state manager.
@@ -769,4 +829,7 @@ All candidates remain subject to WorldQuant BRAIN's evaluation, platform require
 **HARNESS PIPELINE**
 
 A modular quantitative research automation project focused on improving the organization, evaluation, diversification, and management of WorldQuant BRAIN alpha candidates.
+
+
+
 

@@ -52,8 +52,14 @@ def main() -> int:
     parser.add_argument("--file", help="File containing Alpha IDs (JSON array or one ID per line).")
     parser.add_argument("--yes-all", action="store_true",
                         help="Submit eligible queue items without per-alpha prompts.")
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT,
+                        help="Path for structured queue results.")
+    parser.add_argument("--check-only", action="store_true",
+                        help="Refresh alpha status and checks without sending submission requests.")
     parser.add_argument("alpha_ids", nargs="*", help="Alpha IDs to process directly.")
     args = parser.parse_args()
+
+    output_path = args.output
 
     if args.file and args.alpha_ids:
         parser.error("Provide either --file or positional Alpha IDs, not both.")
@@ -64,7 +70,7 @@ def main() -> int:
 
     if not alpha_ids:
         print("No alpha IDs to process.")
-        write_queue_output([])
+        write_queue_output([], output_path)
         return 0
 
     print(f"Queue: {len(alpha_ids)} alpha(s) — {', '.join(alpha_ids)}\n")
@@ -74,7 +80,7 @@ def main() -> int:
         session.login()
     except Exception as exc:
         records = [_failed_record(alpha_id, f"Could not log in: {exc}") for alpha_id in alpha_ids]
-        write_queue_output(records)
+        write_queue_output(records, output_path)
         print(f"Could not log in; recorded {len(records)} failed queue item(s).")
         return 1
 
@@ -104,6 +110,28 @@ def main() -> int:
                 "attempts": 0,
                 "message": "Already ACTIVE before this queue run; no new request sent.",
                 "failed_checks": [],
+            })
+            continue
+
+        if args.check_only:
+            failed_checks = [check for check in checks if check.get("result") == "FAIL"]
+            if brain_status == "ACTIVE":
+                outcome = "active"
+                message = "BRAIN reports the alpha as ACTIVE during the read-only status pass."
+            elif failed_checks or brain_status == "UNSUBMITTED":
+                outcome = "failed"
+                message = "BRAIN reports the alpha as UNSUBMITTED or with failed checks during the read-only status pass."
+            else:
+                outcome = "skipped"
+                message = f"Read-only status pass found BRAIN status {brain_status}; no submission request was sent."
+            print(f"Read-only check: {alpha_id} is {brain_status} ({outcome}).")
+            records.append({
+                "alpha_id": alpha_id,
+                "outcome": outcome,
+                "brain_status": brain_status,
+                "attempts": 0,
+                "message": message,
+                "failed_checks": failed_checks,
             })
             continue
 
@@ -176,7 +204,7 @@ def main() -> int:
         if index < len(alpha_ids) - 1:
             time.sleep(3)
 
-    write_queue_output(records)
+    write_queue_output(records, output_path)
     active = [record for record in records if record.get("outcome") == "active"]
     failed = [record for record in records if record.get("outcome") == "failed"]
     skipped = [record for record in records if record.get("outcome") == "skipped"]
@@ -185,7 +213,7 @@ def main() -> int:
     print(f"Active:  {[record['alpha_id'] for record in active] if active else 'none'}")
     print(f"Failed:  {[record['alpha_id'] for record in failed] if failed else 'none'}")
     print(f"Skipped: {[record['alpha_id'] for record in skipped] if skipped else 'none'}")
-    print(f"Structured queue output saved to {DEFAULT_OUTPUT.relative_to(ROOT)}.")
+    print(f"Structured queue output saved to {output_path}.")
     return 1 if failed else 0
 
 

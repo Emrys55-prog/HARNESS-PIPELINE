@@ -9,7 +9,7 @@ import requests
 from auth import WQSession
 
 BRAIN_API_BASE = "https://api.worldquantbrain.com"
-STATUS_CHECK_ATTEMPTS = 3
+STATUS_CHECK_ATTEMPTS = 1
 STATUS_CHECK_INTERVAL_SECONDS = 15
 
 
@@ -68,7 +68,7 @@ def _failed_checks(alpha: dict) -> list[dict[str, Any]]:
 
 
 def submit_alpha(session: requests.Session, alpha_id: str) -> dict[str, Any]:
-    """Submit once, then check up to three times for ACTIVE status."""
+    """Submit once, then check once for ACTIVE status."""
     resp = _request_with_retry(session, "POST", f"{BRAIN_API_BASE}/alphas/{alpha_id}/submit")
 
     if resp.status_code == 403:
@@ -134,15 +134,15 @@ def submit_alpha(session: requests.Session, alpha_id: str) -> dict[str, Any]:
         )
         if self_corr:
             message = (
-                "BRAIN kept the alpha UNSUBMITTED after three status checks; "
+                "BRAIN kept the alpha UNSUBMITTED after one status check; "
                 f"SELF_CORRELATION failed (value={self_corr.get('value')}, "
                 f"limit={self_corr.get('limit')})."
             )
         else:
-            message = "BRAIN kept the alpha UNSUBMITTED after three status checks."
+            message = "BRAIN kept the alpha UNSUBMITTED after one status check."
     else:
         message = (
-            f"BRAIN did not report ACTIVE after three status checks; "
+            f"BRAIN did not report ACTIVE after one status check; "
             f"final status was {last_status}."
         )
 
@@ -175,3 +175,4 @@ if __name__ == "__main__":
 
     result = submit_alpha(session.session, alpha_id)
     print(f"Outcome: {result['outcome']} ({result['brain_status']})")
+
